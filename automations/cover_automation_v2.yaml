@@ -1,5 +1,5 @@
 blueprint:
-  name: s42 - Intelligente Rollladensteuerung V2 (ein Rollladen pro Automation)
+  name: s42 - Intelligente Rollladensteuerung V2 (ein Rollladen pro Automation) - feat/weekend-times
   description: >
     Steuert einen einzelnen Rollladen anhand "seines" Fensters: morgendliches Öffnen
     (optional mit separater Uhrzeit am Wochenende),
