@@ -2,7 +2,7 @@ blueprint:
   name: s42 - Intelligente Rollladensteuerung V2 (ein Rollladen pro Automation) - feat/weekend-times
   description: >
     Steuert einen einzelnen Rollladen anhand "seines" Fensters: morgendliches Öffnen
-    (optional mit separater Uhrzeit am Wochenende),
+    (optional mit separater Uhrzeit am Wochenende oder beim Beenden des Nachtmodus),
     Reaktion auf gekippte/geöffnete Fenster inkl. Rückfahr-Logik, Nachtmodus, Sturmschutz,
     automatische Beschattung anhand des Sonnenstands (Sonnenschutz, optional mit Filter
     nach Wetterlage), Sonnenheizen (das Gegenteil: öffnet in der Heizperiode
@@ -54,13 +54,31 @@ blueprint:
                 - domain: sensor
     morning_section:
       name: Morgens öffnen
-      description: Einstellungen für das automatische Öffnen am Morgen, optional mit separater Uhrzeit am Wochenende.
+      description: >
+        Einstellungen für das automatische Öffnen am Morgen: per Uhrzeit,
+        optional mit separater Wochenend-Uhrzeit, und/oder beim Ausschalten
+        des Nachtmodus-Helfers.
       icon: mdi:weather-sunset-up
       collapsed: true
       input:
         morning_enabled:
-          name: Morgens öffnen aktivieren
+          name: Morgens per Uhrzeit öffnen
+          description: >
+            Öffnet den Rollladen zu den konfigurierten Morgen-Uhrzeiten.
+            Unabhängig davon kann das Öffnen beim Ausschalten des Nachtmodus
+            über die nächste Option aktiviert werden.
           default: true
+          selector:
+            boolean: {}
+        morning_open_on_night_mode_off:
+          name: Beim Beenden des Nachtmodus öffnen
+          description: >
+            Wenn aktiviert, fährt der Rollladen morgens auch dann auf die Zielposition,
+            wenn der konfigurierte Nachtmodus-Helfer von "an" auf "aus" wechselt.
+            Damit kann eine zentrale Morgenautomation einfach den Nachtmodus beenden;
+            jede Blueprint-Instanz öffnet anschließend selbstständig. Erfordert einen
+            Nachtmodus-Helfer im Abschnitt "Nachtmodus".
+          default: false
           selector:
             boolean: {}
         morning_time:
@@ -619,8 +637,10 @@ blueprint:
           name: Nachtmodus-Helfer (optional)
           description: >
             Ein input_boolean-Helfer. Wird er eingeschaltet, fährt der Rollladen für
-            die Nacht herunter. Leer lassen, wenn kein Nachtmodus gewünscht ist.
-            In allen Blueprint-Instanzen denselben Helfer auswählen.
+            die Nacht herunter. Beim Ausschalten kann er optional auch das morgendliche
+            Öffnen auslösen (siehe Abschnitt "Morgens öffnen"). Leer lassen, wenn kein
+            Nachtmodus gewünscht ist. In allen Blueprint-Instanzen denselben Helfer
+            auswählen.
           default: []
           selector:
             entity:
@@ -891,6 +911,12 @@ triggers:
     id: morning_open_weekend
     enabled: !input morning_enabled
   - trigger: state
+    entity_id: !input night_mode_boolean
+    from: "on"
+    to: "off"
+    id: morning_open_night_mode
+    enabled: !input morning_open_on_night_mode_off
+  - trigger: state
     entity_id: !input window_sensor
     to:
       - "on"
@@ -988,12 +1014,13 @@ actions:
             id:
               - morning_open
               - morning_open_weekend
+              - morning_open_night_mode
           # Ist eine separate Wochenend-Uhrzeit konfiguriert, wird der normale
           # Morgen-Trigger samstags/sonntags ignoriert. Ohne Wochenend-Helfer
           # bleibt das bisherige Verhalten erhalten: morning_time gilt jeden Tag.
           - condition: template
             value_template: >-
-              {{ trigger.id == 'morning_open_weekend'
+              {{ trigger.id in ['morning_open_weekend', 'morning_open_night_mode']
                  or not (now().weekday() in [5, 6] and morning_time_weekend is string) }}
         sequence:
           # Sturm hat immer Vorrang: bei Starkwind wird morgens nicht bewegt
