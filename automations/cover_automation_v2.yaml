@@ -975,8 +975,9 @@ triggers:
 
 actions:
   # Pausier-Helfer: hält die AUTOMATIK an, mit drei Ausnahmen — Sturmschutz
-  # (Hardware-Schutz geht vor), Benachrichtigungs-Aufräumen (bewegt nichts) und
-  # der Notification-Knopf (ein bewusster Nutzer-Befehl, wie der Wandtaster)
+  # (Hardware-Schutz geht vor), window_closed (räumt Meldungen auf und darf einen
+  # aktiven Sturm nachziehen; Nachtbewegungen respektieren pause_now) sowie der
+  # Notification-Knopf (ein bewusster Nutzer-Befehl, wie der Wandtaster)
   - condition: >-
       {{ trigger.id | default('') in ['storm_detected', 'window_closed', 'close_shutter_action']
          or not pause_active }}
@@ -1038,6 +1039,19 @@ actions:
           - condition: trigger
             id: night_close
         sequence:
+          # Aktuellen Sturmzustand direkt beim Umschalten in den Nachtmodus prüfen.
+          # Ist das Fenster geschlossen (oder die Sturm-Aktion explizit erzwungen),
+          # hat der Hardware-Schutz Vorrang vor der Nachtposition.
+          - variables:
+              wind_now: >-
+                {% if storm_wind_sensor is string %}
+                  {{ states(storm_wind_sensor) | float(0) }}
+                {% elif weather_entity is string %}
+                  {{ state_attr(weather_entity, 'wind_speed') | float(0) }}
+                {% else %}
+                  0
+                {% endif %}
+              storm_now: "{{ storm_enabled and (wind_now | float(0)) >= wind_speed_threshold }}"
           # Beschattungs-Status zurücksetzen: Die Nacht beendet die Beschattung,
           # sonst springt der Rollladen morgens beim ersten Tick auf die End-Position
           - if:
@@ -1055,6 +1069,22 @@ actions:
                 target:
                   entity_id: "{{ solar_heating_status_helper }}"
           - choose:
+              # Bei aktivem Sturm und geschlossenem Fenster (oder erzwungener
+              # Sturm-Aktion) hat der Sturmschutz Vorrang vor der Nachtposition.
+              - conditions:
+                  - "{{ storm_now }}"
+                  - "{{ force_storm_action or states(window_sensor) in ['off', 'closed'] }}"
+                sequence:
+                  - if:
+                      - "{{ not panzer_mode }}"
+                    then:
+                      - action: cover.open_cover
+                        target:
+                          entity_id: !input cover
+                    else:
+                      - action: cover.close_cover
+                        target:
+                          entity_id: !input cover
               - conditions:
                   - "{{ states(window_sensor) == 'tilted' or (treat_open_as_tilted and states(window_sensor) in ['on', 'open']) }}"
                 sequence:
@@ -1495,21 +1525,76 @@ actions:
                         - action: "{{ action_id }}"
                           title: Rollladen schließen
 
-      # --- BENACHRICHTIGUNG ABRÄUMEN: FENSTER WIEDER ZU ---
+      # --- FENSTER WIEDER ZU: NACHT-/STURMZUSTAND NACHZIEHEN + MELDUNG ABRÄUMEN ---
       - conditions:
           - condition: trigger
             id: window_closed
-          - "{{ device_name_map | length > 0 }}"
         sequence:
-          - repeat:
-              for_each: "{{ device_name_map }}"
-              sequence:
-                - action: "notify.{{ repeat.item }}"
-                  continue_on_error: true
-                  data:
-                    message: clear_notification
-                    data:
-                      tag: "{{ notification_tag }}"
+          # Der wartende window_change-Lauf endet nach reclose_timeout. Wird das
+          # Fenster erst danach geschlossen, muss der aktuelle Nacht-/Sturmzustand
+          # hier trotzdem noch ausgewertet werden.
+          - variables:
+              night_mode_on_now: "{{ night_mode_boolean is string and is_state(night_mode_boolean, 'on') }}"
+              pause_now: >-
+                {% set helpers = [pause_boolean] if pause_boolean is string else pause_boolean %}
+                {% set pausing = 'on' if pause_mode == 'on_pauses' else 'off' %}
+                {% set found = expand(helpers) | list %}
+                {{ helpers | length > 0
+                   and found | length > 0
+                   and found | rejectattr('state', 'eq', pausing) | list | length == 0 }}
+              wind_now: >-
+                {% if storm_wind_sensor is string %}
+                  {{ states(storm_wind_sensor) | float(0) }}
+                {% elif weather_entity is string %}
+                  {{ state_attr(weather_entity, 'wind_speed') | float(0) }}
+                {% else %}
+                  0
+                {% endif %}
+              storm_now: "{{ storm_enabled and (wind_now | float(0)) >= wind_speed_threshold }}"
+          - choose:
+              # Sturmschutz hat Vorrang. Da das Fenster jetzt geschlossen ist,
+              # darf die konfigurierte Sturm-Aktion unabhängig von der Pause greifen.
+              - conditions:
+                  - "{{ storm_now }}"
+                sequence:
+                  - if:
+                      - "{{ shading_status_helper is string and is_state(shading_status_helper, 'on') }}"
+                    then:
+                      - action: input_boolean.turn_off
+                        target:
+                          entity_id: "{{ shading_status_helper }}"
+                  - if:
+                      - "{{ not panzer_mode }}"
+                    then:
+                      - action: cover.open_cover
+                        target:
+                          entity_id: !input cover
+                    else:
+                      - action: cover.close_cover
+                        target:
+                          entity_id: !input cover
+              # Wurde das Fenster erst nach dem Rückfahr-Zeitfenster geschlossen,
+              # wird ein aktiver Nachtmodus jetzt zuverlässig nachgeholt.
+              - conditions:
+                  - "{{ night_mode_on_now }}"
+                  - "{{ not pause_now }}"
+                sequence:
+                  - action: cover.close_cover
+                    target:
+                      entity_id: !input cover
+          # Benachrichtigungen unabhängig von der Fahrlogik aufräumen.
+          - if:
+              - "{{ device_name_map | length > 0 }}"
+            then:
+              - repeat:
+                  for_each: "{{ device_name_map }}"
+                  sequence:
+                    - action: "notify.{{ repeat.item }}"
+                      continue_on_error: true
+                      data:
+                        message: clear_notification
+                        data:
+                          tag: "{{ notification_tag }}"
 
       # --- NOTIFICATION-ACTION: ROLLLADEN SCHLIESSEN ---
       - conditions:
@@ -1631,6 +1716,27 @@ actions:
                       entity_id: !input cover
             else:
               - choose:
+                  # Sturmschutz hat Vorrang vor Nachtmodus und Snapshot-Restore.
+                  # Das Fenster ist jetzt geschlossen, daher darf die Sturm-Aktion greifen.
+                  - conditions:
+                      - "{{ storm_now }}"
+                    sequence:
+                      - if:
+                          - "{{ shading_status_helper is string and is_state(shading_status_helper, 'on') }}"
+                        then:
+                          - action: input_boolean.turn_off
+                            target:
+                              entity_id: "{{ shading_status_helper }}"
+                      - if:
+                          - "{{ not panzer_mode }}"
+                        then:
+                          - action: cover.open_cover
+                            target:
+                              entity_id: !input cover
+                        else:
+                          - action: cover.close_cover
+                            target:
+                              entity_id: !input cover
                   # Fenster zu + Nachtmodus inzwischen aktiv → schließen statt restaurieren
                   - conditions:
                       - "{{ night_mode_on_now }}"
