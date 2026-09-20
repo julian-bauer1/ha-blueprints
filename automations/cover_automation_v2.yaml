@@ -1604,11 +1604,27 @@ actions:
                         - action: "{{ action_id }}"
                           title: Rollladen schließen
 
-      # --- FENSTER WIEDER ZU: NACHT-/STURMZUSTAND NACHZIEHEN + MELDUNG ABRÄUMEN ---
+      # --- FENSTER WIEDER ZU: MELDUNG ABRÄUMEN + NACHT-/STURMZUSTAND NACHZIEHEN ---
       - conditions:
           - condition: trigger
             id: window_closed
         sequence:
+          # Benachrichtigung IMMER zuerst abräumen. Die nachfolgende Fahrlogik darf
+          # das Entfernen der Meldung nicht verhindern, falls dort ein Template oder
+          # Cover-Service fehlschlägt.
+          - if:
+              - "{{ device_name_map | length > 0 }}"
+            then:
+              - repeat:
+                  for_each: "{{ device_name_map }}"
+                  sequence:
+                    - action: "notify.{{ repeat.item }}"
+                      continue_on_error: true
+                      data:
+                        message: clear_notification
+                        data:
+                          tag: "{{ notification_tag }}"
+
           # Der wartende window_change-Lauf endet nach reclose_timeout. Wird das
           # Fenster erst danach geschlossen, muss der aktuelle Nacht-/Sturmzustand
           # hier trotzdem noch ausgewertet werden.
@@ -1676,19 +1692,6 @@ actions:
                   - action: cover.close_cover
                     target:
                       entity_id: !input cover
-          # Benachrichtigungen unabhängig von der Fahrlogik aufräumen.
-          - if:
-              - "{{ device_name_map | length > 0 }}"
-            then:
-              - repeat:
-                  for_each: "{{ device_name_map }}"
-                  sequence:
-                    - action: "notify.{{ repeat.item }}"
-                      continue_on_error: true
-                      data:
-                        message: clear_notification
-                        data:
-                          tag: "{{ notification_tag }}"
 
       # --- NOTIFICATION-ACTION: ROLLLADEN SCHLIESSEN ---
       - conditions:
