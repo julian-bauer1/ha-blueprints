@@ -130,7 +130,9 @@ blueprint:
           name: Zielposition für gekipptes Fenster
           description: >
             Die Position (in %), auf die der Rollladen fährt, wenn das Fenster gekippt
-            wird. Es wird nur gefahren, wenn der Rollladen geschlossener ist.
+            wird. Tagsüber wird nur gefahren, wenn der Rollladen geschlossener ist.
+            Bei aktivem Nachtmodus ist dies die feste Kipp-Zielposition: Ein weiter
+            geöffneter Rollladen fährt beim neuen Kipp-Ereignis ebenfalls hierhin zurück.
           default: 20
           selector:
             number:
@@ -1715,6 +1717,15 @@ actions:
               # Kennung dieses Fensterzustands. Damit darf ein älterer paralleler
               # Lauf nach einem neueren Kippen/Öffnen/Schließen nicht mehr fahren.
               window_run_generation: "{{ as_timestamp(trigger.to_state.last_changed) | float(0) }}"
+              night_tilt_event: >-
+                {{ night_mode_on
+                   and (
+                     trigger.to_state.state in ['tilted', 'gekippt']
+                     or (
+                       treat_open_as_tilted
+                       and trigger.to_state.state in ['on', 'open', 'offen']
+                     )
+                   ) }}
               manual_night_override_before_window: >-
                 {{ night_mode_on
                    and trigger.from_state is not none
@@ -1729,16 +1740,27 @@ actions:
               - "{{ night_manual_override_helper is string }}"
               - "{{ trigger.from_state is not none and trigger.from_state.state in ['off', 'closed', 'geschlossen'] }}"
             then:
+              # Ein neuer Kippzustand im Nachtmodus ist selbst die gewünschte
+              # automatische Zielstellung. Ein noch weit geöffneter Rollladen
+              # (z.B. vom vorher komplett offenen Fenster) darf dabei nicht
+              # fälschlich als manueller Nacht-Override gespeichert werden.
               - if:
-                  - "{{ manual_night_override_before_window }}"
+                  - "{{ night_tilt_event }}"
                 then:
-                  - action: input_boolean.turn_on
-                    target:
-                      entity_id: "{{ night_manual_override_helper }}"
-                else:
                   - action: input_boolean.turn_off
                     target:
                       entity_id: "{{ night_manual_override_helper }}"
+                else:
+                  - if:
+                      - "{{ manual_night_override_before_window }}"
+                    then:
+                      - action: input_boolean.turn_on
+                        target:
+                          entity_id: "{{ night_manual_override_helper }}"
+                    else:
+                      - action: input_boolean.turn_off
+                        target:
+                          entity_id: "{{ night_manual_override_helper }}"
           # Ausgangsposition nur beim Übergang aus "geschlossen" sichern — sonst
           # überschreibt Kippen→Öffnen den Snapshot mit der Kipp-Position. Nach
           # unavailable/unknown nur sichern, wenn noch KEIN Snapshot existiert:
@@ -1767,7 +1789,12 @@ actions:
           - choose:
               - conditions:
                   - "{{ trigger.to_state.state in ['tilted', 'gekippt'] or (treat_open_as_tilted and trigger.to_state.state in ['on', 'open', 'offen']) }}"
-                  - "{{ state_attr(cover_entity, 'current_position') | int(101) < tilted_position }}"
+                  # Tagsüber bleibt die bisherige Mindestöffnungs-Logik erhalten.
+                  # Nachts ist die Kipp-Position dagegen eine feste Zielposition:
+                  # auch ein weiter geöffneter Rollladen fährt bei neuem Kippzustand zurück.
+                  - >-
+                    {{ night_tilt_event
+                       or state_attr(cover_entity, 'current_position') | int(101) < tilted_position }}
                 sequence:
                   - action: cover.set_cover_position
                     target:
