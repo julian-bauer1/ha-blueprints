@@ -658,6 +658,34 @@ blueprint:
               step: 1
               mode: slider
               unit_of_measurement: "%"
+        night_manual_override_threshold:
+          name: Toleranz für manuelles Öffnen im Nachtmodus
+          description: >
+            Ist der Rollladen deutlich weiter geöffnet als die automatische
+            Nachtposition, wird das als bewusster manueller Eingriff gewertet.
+            5 % ist ein guter Standardwert.
+          default: 5
+          selector:
+            number:
+              min: 0
+              max: 30
+              step: 1
+              mode: slider
+              unit_of_measurement: "%"
+        night_manual_override_helper:
+          name: Status-Helfer für manuellen Nacht-Override (optional)
+          description: >
+            Optionaler input_boolean-Helfer NUR für diesen Rollladen. Er merkt sich,
+            dass der Rollladen im aktiven Nachtmodus bewusst manuell geöffnet wurde,
+            bevor das Fenster bzw. die Tür geöffnet wurde. Dadurch bleibt diese
+            manuelle Öffnung auch nach einem langen Lüften, nach Ablauf des
+            Rückfahr-Zeitfensters und beim anschließenden Schließen erhalten.
+            Der Sturmschutz hat weiterhin Vorrang. Ohne Helfer verwendet der
+            Blueprint weiterhin die Positions-Erkennung als Fallback.
+          default: []
+          selector:
+            entity:
+              domain: input_boolean
     storm_protection_section:
       name: Sturmschutz
       description: Fährt den Rollladen bei starkem Wind hoch (oder im Panzer-Modus herunter).
@@ -832,6 +860,8 @@ variables:
   morning_time_weekend: !input morning_time_weekend
   night_mode_boolean: !input night_mode_boolean
   night_ventilation_position: !input night_ventilation_position
+  night_manual_override_threshold: !input night_manual_override_threshold
+  night_manual_override_helper: !input night_manual_override_helper
   storm_enabled: !input storm_enabled
   weather_entity: !input weather_entity
   storm_wind_sensor: !input storm_wind_sensor
@@ -1023,6 +1053,13 @@ actions:
               {{ trigger.id in ['morning_open_weekend', 'morning_open_night_mode']
                  or not (now().weekday() in [5, 6] and morning_time_weekend is string) }}
         sequence:
+          # Der Tagbetrieb beendet einen manuellen Nacht-Override.
+          - if:
+              - "{{ night_manual_override_helper is string }}"
+            then:
+              - action: input_boolean.turn_off
+                target:
+                  entity_id: "{{ night_manual_override_helper }}"
           # Sturm hat immer Vorrang: bei Starkwind wird morgens nicht bewegt
           # (im Panzer-Modus wäre das Öffnen direkt kontraproduktiv)
           - variables:
@@ -1066,6 +1103,13 @@ actions:
           - condition: trigger
             id: night_close
         sequence:
+          # Ein neuer Nachtmodus beginnt immer ohne alten manuellen Override.
+          - if:
+              - "{{ night_manual_override_helper is string }}"
+            then:
+              - action: input_boolean.turn_off
+                target:
+                  entity_id: "{{ night_manual_override_helper }}"
           # Aktuellen Sturmzustand direkt beim Umschalten in den Nachtmodus prüfen.
           # Ist das Fenster geschlossen (oder die Sturm-Aktion explizit erzwungen),
           # hat der Hardware-Schutz Vorrang vor der Nachtposition.
@@ -1578,6 +1622,15 @@ actions:
                   0
                 {% endif %}
               storm_now: "{{ storm_enabled and (wind_now | float(0)) >= wind_speed_threshold }}"
+              current_position_now: "{{ state_attr(cover_entity, 'current_position') | int(-1) }}"
+              night_manual_open_override: >-
+                {% set helper_override = night_manual_override_helper is string
+                   and is_state(night_manual_override_helper, 'on') %}
+                {% set auto_limit = [tilted_position | int(0), night_ventilation_position | int(0)] | max %}
+                {% set threshold = night_manual_override_threshold | int(5) %}
+                {% set position_override = (current_position_now | int(-1)) >= 0
+                   and (current_position_now | int(-1)) > (auto_limit + threshold) %}
+                {{ helper_override or position_override }}
           - choose:
               # Sturmschutz hat Vorrang. Da das Fenster jetzt geschlossen ist,
               # darf die konfigurierte Sturm-Aktion unabhängig von der Pause greifen.
@@ -1601,10 +1654,13 @@ actions:
                         target:
                           entity_id: !input cover
               # Wurde das Fenster erst nach dem Rückfahr-Zeitfenster geschlossen,
-              # wird ein aktiver Nachtmodus jetzt zuverlässig nachgeholt.
+              # wird ein aktiver Nachtmodus zuverlässig nachgeholt. Ausnahme:
+              # Ein gespeicherter manueller Nacht-Override oder eine eindeutig
+              # weiter geöffnete Ist-Position hat Vorrang vor dem Nachtmodus.
               - conditions:
                   - "{{ night_mode_on_now }}"
                   - "{{ not pause_now }}"
+                  - "{{ not night_manual_open_override }}"
                 sequence:
                   - action: cover.close_cover
                     target:
@@ -1641,6 +1697,31 @@ actions:
           - variables:
               night_mode_on: "{{ night_mode_boolean is string and is_state(night_mode_boolean, 'on') }}"
               reclose_scene: "scene.reclose_{{ cover_entity | slugify }}"
+              current_position_before_window: "{{ state_attr(cover_entity, 'current_position') | int(-1) }}"
+              manual_night_override_before_window: >-
+                {{ night_mode_on
+                   and trigger.from_state is not none
+                   and trigger.from_state.state in ['off', 'closed']
+                   and (current_position_before_window | int(-1)) >= 0
+                   and (current_position_before_window | int(-1)) > (night_manual_override_threshold | int(5)) }}
+          # Wenn die Tür/das Fenster im Nachtmodus geöffnet wird und der Rollladen
+          # schon VOR der Fensterreaktion deutlich offen war, war das eine bewusste
+          # manuelle Öffnung. Diese Information persistent merken. War er dagegen
+          # geschlossen, wird ein alter Override für diesen neuen Fensterzyklus gelöscht.
+          - if:
+              - "{{ night_manual_override_helper is string }}"
+              - "{{ trigger.from_state is not none and trigger.from_state.state in ['off', 'closed'] }}"
+            then:
+              - if:
+                  - "{{ manual_night_override_before_window }}"
+                then:
+                  - action: input_boolean.turn_on
+                    target:
+                      entity_id: "{{ night_manual_override_helper }}"
+                else:
+                  - action: input_boolean.turn_off
+                    target:
+                      entity_id: "{{ night_manual_override_helper }}"
           # Ausgangsposition nur beim Übergang aus "geschlossen" sichern — sonst
           # überschreibt Kippen→Öffnen den Snapshot mit der Kipp-Position. Nach
           # unavailable/unknown nur sichern, wenn noch KEIN Snapshot existiert:
@@ -1730,6 +1811,15 @@ actions:
                   0
                 {% endif %}
               storm_now: "{{ storm_enabled and (wind_now | float(0)) >= wind_speed_threshold }}"
+              current_position_now: "{{ state_attr(cover_entity, 'current_position') | int(-1) }}"
+              night_manual_open_override: >-
+                {% set helper_override = night_manual_override_helper is string
+                   and is_state(night_manual_override_helper, 'on') %}
+                {% set auto_limit = [tilted_position | int(0), night_ventilation_position | int(0)] | max %}
+                {% set threshold = night_manual_override_threshold | int(5) %}
+                {% set position_override = (current_position_now | int(-1)) >= 0
+                   and (current_position_now | int(-1)) > (auto_limit + threshold) %}
+                {{ helper_override or position_override }}
           - if:
               - "{{ wait.trigger is none }}"
             then:
@@ -1764,10 +1854,12 @@ actions:
                           - action: cover.close_cover
                             target:
                               entity_id: !input cover
-                  # Fenster zu + Nachtmodus inzwischen aktiv → schließen statt restaurieren
+                  # Fenster zu + Nachtmodus inzwischen aktiv → schließen statt restaurieren.
+                  # Eine bewusste manuelle Öffnung hat jedoch Vorrang.
                   - conditions:
                       - "{{ night_mode_on_now }}"
                       - "{{ not pause_now }}"
+                      - "{{ not night_manual_open_override }}"
                     sequence:
                       - action: cover.close_cover
                         target:
@@ -1779,6 +1871,7 @@ actions:
                   # Zeitstempel und steht bei nie aktivierten Szenen dauerhaft auf
                   # 'unknown'; ein State-Check würde den ersten Restore für immer blockieren
                   - conditions:
+                      - "{{ not night_mode_on_now }}"
                       - "{{ not storm_now }}"
                       - "{{ not pause_now }}"
                       - "{{ expand(reclose_scene) | count > 0 }}"
