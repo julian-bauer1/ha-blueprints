@@ -951,7 +951,9 @@ triggers:
     to:
       - "on"
       - "open"
+      - "offen"
       - "tilted"
+      - "gekippt"
     for:
       seconds: 2
     id: window_change
@@ -960,12 +962,15 @@ triggers:
     to:
       - "on"
       - "open"
+      - "offen"
     for:
       minutes: !input notification_timeout
     id: window_open_long
   - trigger: state
     entity_id: !input window_sensor
-    to: "tilted"
+    to:
+      - "tilted"
+      - "gekippt"
     for:
       minutes: !input notification_timeout_tilted
     id: window_tilted_long
@@ -974,6 +979,7 @@ triggers:
     to:
       - "off"
       - "closed"
+      - "geschlossen"
     for:
       seconds: 2
     id: window_closed
@@ -1023,7 +1029,9 @@ triggers:
     to:
       - "on"
       - "open"
+      - "offen"
       - "tilted"
+      - "gekippt"
     for:
       seconds: 2
     id: mosquito_lights
@@ -1144,7 +1152,7 @@ actions:
               # Sturm-Aktion) hat der Sturmschutz Vorrang vor der Nachtposition.
               - conditions:
                   - "{{ storm_now }}"
-                  - "{{ force_storm_action or states(window_sensor) in ['off', 'closed'] }}"
+                  - "{{ force_storm_action or states(window_sensor) in ['off', 'closed', 'geschlossen'] }}"
                 sequence:
                   - if:
                       - "{{ not panzer_mode }}"
@@ -1157,7 +1165,7 @@ actions:
                         target:
                           entity_id: !input cover
               - conditions:
-                  - "{{ states(window_sensor) == 'tilted' or (treat_open_as_tilted and states(window_sensor) in ['on', 'open']) }}"
+                  - "{{ states(window_sensor) in ['tilted', 'gekippt'] or (treat_open_as_tilted and states(window_sensor) in ['on', 'open', 'offen']) }}"
                 sequence:
                   - action: cover.set_cover_position
                     target:
@@ -1165,7 +1173,7 @@ actions:
                     data:
                       position: !input tilted_position
               - conditions:
-                  - "{{ states(window_sensor) in ['on', 'open'] }}"
+                  - "{{ states(window_sensor) in ['on', 'open', 'offen'] }}"
                 sequence:
                   - action: cover.set_cover_position
                     target:
@@ -1181,7 +1189,7 @@ actions:
       - conditions:
           - condition: trigger
             id: storm_detected
-          - "{{ force_storm_action or states(window_sensor) in ['off', 'closed'] }}"
+          - "{{ force_storm_action or states(window_sensor) in ['off', 'closed', 'geschlossen'] }}"
         sequence:
           # Beschattungs-Status zurücksetzen: Die Sturm-Bewegung darf nicht als
           # manueller Eingriff gewertet werden — sobald der Wind nachlässt, soll
@@ -1246,7 +1254,7 @@ actions:
             then:
               - choose:
                   - conditions:
-                      - "{{ states(window_sensor) == 'tilted' or (treat_open_as_tilted and states(window_sensor) in ['on', 'open']) }}"
+                      - "{{ states(window_sensor) in ['tilted', 'gekippt'] or (treat_open_as_tilted and states(window_sensor) in ['on', 'open', 'offen']) }}"
                     sequence:
                       - action: cover.set_cover_position
                         target:
@@ -1254,7 +1262,7 @@ actions:
                         data:
                           position: !input tilted_position
                   - conditions:
-                      - "{{ states(window_sensor) in ['on', 'open'] }}"
+                      - "{{ states(window_sensor) in ['on', 'open', 'offen'] }}"
                     sequence:
                       - action: cover.set_cover_position
                         target:
@@ -1352,7 +1360,7 @@ actions:
                   - "{{ storm_ok }}"
                   - "{{ weather_ok }}"
                   - "{{ not (night_mode_boolean is string and is_state(night_mode_boolean, 'on')) }}"
-                  - "{{ force_shading or treat_open_as_tilted or states(window_sensor) not in ['on', 'open'] }}"
+                  - "{{ force_shading or treat_open_as_tilted or states(window_sensor) not in ['on', 'open', 'offen'] }}"
                 sequence:
                   - variables:
                       # Höhe (über dem Boden), auf der ein Sonnenstrahl die Fensterebene
@@ -1368,7 +1376,7 @@ actions:
                         {% set p = (a + glass_free * (b - a) / 100) | round(0) | int %}
                         {% set p = [p, shading_min_position | int] | max %}
                         {% set p = [p, 100] | min %}
-                        {% if states(window_sensor) in ['tilted', 'on', 'open'] %}
+                        {% if states(window_sensor) in ['tilted', 'gekippt', 'on', 'open', 'offen'] %}
                           {{ [p, tilted_position | int] | max }}
                         {% else %}
                           {{ p }}
@@ -1606,6 +1614,7 @@ actions:
           # hier trotzdem noch ausgewertet werden.
           - variables:
               night_mode_on_now: "{{ night_mode_boolean is string and is_state(night_mode_boolean, 'on') }}"
+              window_still_closed: "{{ states(window_sensor) in ['off', 'closed', 'geschlossen'] }}"
               pause_now: >-
                 {% set helpers = [pause_boolean] if pause_boolean is string else pause_boolean %}
                 {% set pausing = 'on' if pause_mode == 'on_pauses' else 'off' %}
@@ -1635,6 +1644,7 @@ actions:
               # Sturmschutz hat Vorrang. Da das Fenster jetzt geschlossen ist,
               # darf die konfigurierte Sturm-Aktion unabhängig von der Pause greifen.
               - conditions:
+                  - "{{ window_still_closed }}"
                   - "{{ storm_now }}"
                 sequence:
                   - if:
@@ -1658,6 +1668,7 @@ actions:
               # Ein gespeicherter manueller Nacht-Override oder eine eindeutig
               # weiter geöffnete Ist-Position hat Vorrang vor dem Nachtmodus.
               - conditions:
+                  - "{{ window_still_closed }}"
                   - "{{ night_mode_on_now }}"
                   - "{{ not pause_now }}"
                   - "{{ not night_manual_open_override }}"
@@ -1698,10 +1709,13 @@ actions:
               night_mode_on: "{{ night_mode_boolean is string and is_state(night_mode_boolean, 'on') }}"
               reclose_scene: "scene.reclose_{{ cover_entity | slugify }}"
               current_position_before_window: "{{ state_attr(cover_entity, 'current_position') | int(-1) }}"
+              # Kennung dieses Fensterzustands. Damit darf ein älterer paralleler
+              # Lauf nach einem neueren Kippen/Öffnen/Schließen nicht mehr fahren.
+              window_run_generation: "{{ as_timestamp(trigger.to_state.last_changed) | float(0) }}"
               manual_night_override_before_window: >-
                 {{ night_mode_on
                    and trigger.from_state is not none
-                   and trigger.from_state.state in ['off', 'closed']
+                   and trigger.from_state.state in ['off', 'closed', 'geschlossen']
                    and (current_position_before_window | int(-1)) >= 0
                    and (current_position_before_window | int(-1)) > (night_manual_override_threshold | int(5)) }}
           # Wenn die Tür/das Fenster im Nachtmodus geöffnet wird und der Rollladen
@@ -1710,7 +1724,7 @@ actions:
           # geschlossen, wird ein alter Override für diesen neuen Fensterzyklus gelöscht.
           - if:
               - "{{ night_manual_override_helper is string }}"
-              - "{{ trigger.from_state is not none and trigger.from_state.state in ['off', 'closed'] }}"
+              - "{{ trigger.from_state is not none and trigger.from_state.state in ['off', 'closed', 'geschlossen'] }}"
             then:
               - if:
                   - "{{ manual_night_override_before_window }}"
@@ -1730,7 +1744,7 @@ actions:
           - if:
               - >-
                 {{ trigger.from_state is not none
-                   and (trigger.from_state.state in ['off', 'closed']
+                   and (trigger.from_state.state in ['off', 'closed', 'geschlossen']
                         or (trigger.from_state.state in ['unavailable', 'unknown']
                             and expand(reclose_scene) | count == 0)) }}
             then:
@@ -1739,9 +1753,17 @@ actions:
                   scene_id: "{{ 'reclose_' ~ (cover_entity | slugify) }}"
                   snapshot_entities:
                     - "{{ cover_entity }}"
+          # Ein neuerer Fensterzustand gewinnt. Falls sich der Sensor während der
+          # vorbereitenden Aktionen bereits weiterbewegt hat (z.B. gekippt -> offen),
+          # beendet sich dieser ältere Lauf hier, bevor er noch einen alten Fahrbefehl sendet.
+          - condition: >-
+              {{ trigger.to_state is not none
+                 and states(window_sensor) == trigger.to_state.state
+                 and ((as_timestamp(states[window_sensor].last_changed) | float(0))
+                      - (window_run_generation | float(0))) | abs < 0.001 }}
           - choose:
               - conditions:
-                  - "{{ trigger.to_state.state == 'tilted' or (treat_open_as_tilted and trigger.to_state.state in ['on', 'open']) }}"
+                  - "{{ trigger.to_state.state in ['tilted', 'gekippt'] or (treat_open_as_tilted and trigger.to_state.state in ['on', 'open', 'offen']) }}"
                   - "{{ state_attr(cover_entity, 'current_position') | int(101) < tilted_position }}"
                 sequence:
                   - action: cover.set_cover_position
@@ -1750,7 +1772,7 @@ actions:
                     data:
                       position: !input tilted_position
               - conditions:
-                  - "{{ trigger.to_state.state in ['on', 'open'] }}"
+                  - "{{ trigger.to_state.state in ['on', 'open', 'offen'] }}"
                   - "{{ not treat_open_as_tilted }}"
                   - "{{ not night_mode_on }}"
                   # Bei aktiver erzwungener Beschattung bleibt der Rollladen unten
@@ -1770,7 +1792,7 @@ actions:
                           entity_id: "{{ shading_status_helper }}"
               # Nachts nur bis zur Lüftungsposition öffnen statt komplett
               - conditions:
-                  - "{{ trigger.to_state.state in ['on', 'open'] }}"
+                  - "{{ trigger.to_state.state in ['on', 'open', 'offen'] }}"
                   - "{{ not treat_open_as_tilted }}"
                   - "{{ night_mode_on }}"
                   - "{{ state_attr(cover_entity, 'current_position') | int(101) < night_ventilation_position }}"
@@ -1786,6 +1808,7 @@ actions:
                 to:
                   - "off"
                   - "closed"
+                  - "geschlossen"
                 for:
                   seconds: 2
             timeout:
@@ -1820,6 +1843,27 @@ actions:
                 {% set position_override = (current_position_now | int(-1)) >= 0
                    and (current_position_now | int(-1)) > (auto_limit + threshold) %}
                 {{ helper_override or position_override }}
+              # Nur der Lauf des zuletzt gültigen Offen-/Kipp-Zustands darf nach dem
+              # Warten noch eingreifen. Beispiel geschlossen -> gekippt -> offen:
+              # Beim späteren Schließen wird der gekippt-Lauf verworfen; nur der
+              # offen-Lauf darf restaurieren/schließen. Wurde inzwischen wieder
+              # geöffnet, werden auch alle durch das alte Schließen geweckten Läufe verworfen.
+              window_run_is_latest: >-
+                {% set started = window_run_generation | float(0) %}
+                {% if wait.trigger is none %}
+                  {{ states(window_sensor) in ['on', 'open', 'offen', 'tilted', 'gekippt']
+                     and (((as_timestamp(states[window_sensor].last_changed) | float(0))
+                           - started) | abs) < 0.001 }}
+                {% else %}
+                  {{ states(window_sensor) in ['off', 'closed', 'geschlossen']
+                     and wait.trigger.from_state is not none
+                     and (((as_timestamp(wait.trigger.from_state.last_changed) | float(0))
+                           - started) | abs) < 0.001 }}
+                {% endif %}
+          # Parallel-Modus bleibt bewusst erhalten (Sturm/Benachrichtigung/Beschattung
+          # sollen sich nicht gegenseitig abbrechen). Nur veraltete Fenster-Läufe
+          # verlieren hier ihre Berechtigung zu fahren.
+          - condition: "{{ window_run_is_latest }}"
           - if:
               - "{{ wait.trigger is none }}"
             then:
