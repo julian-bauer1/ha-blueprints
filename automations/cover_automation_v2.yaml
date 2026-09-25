@@ -20,7 +20,7 @@ blueprint:
   author: TheRealSimon42
   homeassistant:
     min_version: "2024.10.0"
-  source_url: https://raw.githubusercontent.com/TheRealSimon42/ha-blueprints/main/automations/cover_automation_v2.yaml
+  source_url: https://raw.githubusercontent.com/julian-bauer1/ha-blueprints/feat/bug-fix/automations/cover_automation_v2.yaml
   input:
     assignment_section:
       name: Zuordnung
@@ -948,6 +948,17 @@ triggers:
     to: "off"
     id: morning_open_night_mode
     enabled: !input morning_open_on_night_mode_off
+
+  # Recovery-Event der zentralen V2-Tagsteuerung. Wird verwendet, wenn der
+  # Nachtmodus-Helfer nach einem Stromausfall bereits OFF ist und deshalb kein
+  # normaler on -> off State-Trigger mehr entstehen kann.
+  - trigger: event
+    event_type: rolladen_mode_reconcile
+    event_data:
+      night_mode_entity: !input night_mode_boolean
+      mode: day
+    id: morning_open_reconcile
+    enabled: !input morning_open_on_night_mode_off
   - trigger: state
     entity_id: !input window_sensor
     to:
@@ -1002,6 +1013,16 @@ triggers:
     entity_id: !input night_mode_boolean
     to: "on"
     id: night_close
+
+  # Recovery-Event der zentralen V2-Nachtsteuerung. Wird verwendet, wenn der
+  # Nachtmodus-Helfer nach einem Stromausfall bereits ON ist und deshalb kein
+  # normaler off -> on State-Trigger mehr entstehen kann.
+  - trigger: event
+    event_type: rolladen_mode_reconcile
+    event_data:
+      night_mode_entity: !input night_mode_boolean
+      mode: night
+    id: night_close_reconcile
   - trigger: numeric_state
     entity_id: !input weather_entity
     attribute: wind_speed
@@ -1048,11 +1069,16 @@ actions:
   # letzter Zustand während eines HA-Neustarts erhalten bleiben, ohne dass
   # dieser als frisches Fensterereignis eine Rollladenbewegung auslöst.
   #
-  # Zwei bewusste Ausnahmen:
+  # Bewusste Ausnahmen:
   # - Ein manueller "Rollladen schließen"-Befehl aus einer Benachrichtigung
   #   funktioniert weiterhin unabhängig vom Fenstersensor.
   # - Ein ausdrücklich erzwungener Sturmschutz darf ebenfalls unabhängig vom
   #   Fenstersensor reagieren.
+  # - Morgen-/Nacht-Trigger sowie die V2-Recovery-Events dürfen den Startschutz
+  #   passieren. Ihre Sequenzen warten anschließend bis zu 5 Minuten auf einen
+  #   gültigen Fensterstatus und ein verfügbares Cover, damit einmalige Trigger
+  #   nicht durch einen
+  #   kurzen Startup-/Recovery-Zustand verloren gehen.
   - condition: >-
       {% set trigger_id = trigger.id | default('') %}
       {% set source_ready = state_attr(window_sensor, 'source_ready') %}
@@ -1069,6 +1095,14 @@ actions:
           trigger_id == 'storm_detected'
           and force_storm_action
         )
+        or trigger_id in [
+          'morning_open',
+          'morning_open_weekend',
+          'morning_open_night_mode',
+          'morning_open_reconcile',
+          'night_close',
+          'night_close_reconcile'
+        ]
         or window_ready
       }}
 
@@ -1087,14 +1121,34 @@ actions:
               - morning_open
               - morning_open_weekend
               - morning_open_night_mode
+              - morning_open_reconcile
           # Ist eine separate Wochenend-Uhrzeit konfiguriert, wird der normale
           # Morgen-Trigger samstags/sonntags ignoriert. Ohne Wochenend-Helfer
           # bleibt das bisherige Verhalten erhalten: morning_time gilt jeden Tag.
           - condition: template
             value_template: >-
-              {{ trigger.id in ['morning_open_weekend', 'morning_open_night_mode']
+              {{ trigger.id in ['morning_open_weekend', 'morning_open_night_mode', 'morning_open_reconcile']
                  or not (now().weekday() in [5, 6] and morning_time_weekend is string) }}
         sequence:
+          # Ein einmaliger Morgen-Trigger bzw. ein Recovery-Event soll nicht
+          # verloren gehen, nur weil Fensterstatus oder Cover während
+          # Startup/Recovery kurz nicht bereit sind.
+          # Normale Sensoren ohne source_ready laufen sofort weiter; Küche/Wohnzimmer
+          # warten, bis ihre Rohsensoren source_ready=true melden.
+          - wait_template: >-
+              {% set source_ready = state_attr(window_sensor, 'source_ready') %}
+              {{ has_value(window_sensor)
+                 and has_value(cover_entity)
+                 and (source_ready is none or (source_ready | bool(false))) }}
+            timeout: "00:05:00"
+            continue_on_timeout: false
+
+          # Wurde der Nachtmodus während des Wartens wieder eingeschaltet, darf ein
+          # verzögerter morning_open_night_mode-Lauf nicht mehr nachträglich öffnen.
+          - condition: >-
+              {{ trigger.id not in ['morning_open_night_mode', 'morning_open_reconcile']
+                 or not (night_mode_boolean is string and is_state(night_mode_boolean, 'on')) }}
+
           # Der Tagbetrieb beendet einen manuellen Nacht-Override.
           - if:
               - "{{ night_manual_override_helper is string }}"
@@ -1143,8 +1197,26 @@ actions:
       # --- NACHTMODUS ---
       - conditions:
           - condition: trigger
-            id: night_close
+            id:
+              - night_close
+              - night_close_reconcile
         sequence:
+          # Auch der einmalige Nacht-Trigger bzw. ein Recovery-Event wartet kurz auf
+          # einen verlässlichen Fensterzustand und ein verfügbares Cover. Nach
+          # spätestens 5 Minuten wird der Lauf ohne Bewegung beendet.
+          - wait_template: >-
+              {% set source_ready = state_attr(window_sensor, 'source_ready') %}
+              {{ has_value(window_sensor)
+                 and has_value(cover_entity)
+                 and (source_ready is none or (source_ready | bool(false))) }}
+            timeout: "00:05:00"
+            continue_on_timeout: false
+
+          # Falls der Nachtmodus während des Wartens bereits wieder beendet wurde,
+          # ist dieser verzögerte Schließlauf nicht mehr gültig.
+          - condition: >-
+              {{ night_mode_boolean is string and is_state(night_mode_boolean, 'on') }}
+
           # Ein neuer Nachtmodus beginnt immer ohne alten manuellen Override.
           - if:
               - "{{ night_manual_override_helper is string }}"
